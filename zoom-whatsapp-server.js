@@ -401,6 +401,17 @@ app.get('/health', (req, res) => {
   res.send('Zoom WhatsApp server is running');
 });
 
+app.get('/debug/env', (req, res) => {
+  res.json({
+    hasZoomAccountId: !!process.env.ZOOM_ACCOUNT_ID,
+    hasZoomClientId: !!process.env.ZOOM_CLIENT_ID,
+    hasZoomClientSecret: !!process.env.ZOOM_CLIENT_SECRET,
+    hasZoomWebhookSecretToken: !!process.env.ZOOM_WEBHOOK_SECRET_TOKEN,
+    dailyJapaMeetingId: process.env.DAILY_JAPA_MEETING_ID || null,
+    timezone: process.env.REPORT_TIMEZONE || null,
+  });
+});
+
 app.post('/zoom/webhook', async (req, res) => {
   try {
     const body = req.body;
