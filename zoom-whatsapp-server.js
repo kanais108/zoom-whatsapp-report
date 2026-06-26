@@ -427,7 +427,11 @@ app.post('/zoom/webhook', async (req, res) => {
       return res.status(401).send('Invalid signature');
     }
 
-    if (body.event === 'meeting.ended') {
+    if (
+  body.event === 'meeting.ended' ||
+  body.event === 'meeting.ended.v2' ||
+  body.event === 'meeting.end'
+) {
       res.status(200).send('Meeting ended received');
 
       processMeetingEndedEvent(body).catch(error => {
