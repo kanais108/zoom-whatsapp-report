@@ -327,6 +327,39 @@ function handleZoomUrlValidation(body) {
   };
 }
 
+async function sendWhatsAppMessage(text) {
+  if (
+    !process.env.META_WHATSAPP_TOKEN ||
+    !process.env.META_PHONE_NUMBER_ID ||
+    !process.env.WHATSAPP_REPORT_TO
+  ) {
+    console.log('Meta WhatsApp values are missing. Skipping WhatsApp send.');
+    return;
+  }
+
+  const response = await axios.post(
+    `https://graph.facebook.com/v20.0/${process.env.META_PHONE_NUMBER_ID}/messages`,
+    {
+      messaging_product: 'whatsapp',
+      to: process.env.WHATSAPP_REPORT_TO,
+      type: 'text',
+      text: {
+        preview_url: false,
+        body: text,
+      },
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.META_WHATSAPP_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  console.log('WhatsApp message sent via Meta Cloud API');
+  console.log(JSON.stringify(response.data));
+}
+
 async function processMeetingEndedEvent(body) {
   const meeting = body.payload.object;
 
@@ -395,6 +428,7 @@ async function processMeetingEndedEvent(body) {
   console.log('');
   console.log(finalReport);
   console.log('');
+await sendWhatsAppMessage(finalReport);
 }
 
 app.get('/health', (req, res) => {
