@@ -491,6 +491,68 @@ app.post('/zoom/webhook', async (req, res) => {
 
 const port = process.env.PORT || 3000;
 
+app.get('/meta/webhook', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  console.log('Meta webhook verification request received');
+
+  if (
+    mode === 'subscribe' &&
+    token === process.env.META_WEBHOOK_VERIFY_TOKEN
+  ) {
+    console.log('Meta webhook verified successfully');
+    return res.status(200).send(challenge);
+  }
+
+  console.log('Meta webhook verification failed');
+  return res.sendStatus(403);
+});
+
+app.post('/meta/webhook', (req, res) => {
+  console.log('Meta webhook event received');
+  console.log(JSON.stringify(req.body, null, 2));
+
+  const entries = req.body.entry || [];
+
+  for (const entry of entries) {
+    const changes = entry.changes || [];
+
+    for (const change of changes) {
+      const value = change.value || {};
+
+      if (value.statuses) {
+        for (const status of value.statuses) {
+          console.log('WhatsApp message status update');
+          console.log('Message ID:', status.id);
+          console.log('Status:', status.status);
+          console.log('Timestamp:', status.timestamp);
+          console.log('Recipient:', status.recipient_id);
+
+          if (status.errors) {
+            console.log('Status errors:', JSON.stringify(status.errors, null, 2));
+          }
+        }
+      }
+
+      if (value.messages) {
+        for (const message of value.messages) {
+          console.log('Incoming WhatsApp message');
+          console.log('From:', message.from);
+          console.log('Message type:', message.type);
+
+          if (message.text) {
+            console.log('Text:', message.text.body);
+          }
+        }
+      }
+    }
+  }
+
+  return res.sendStatus(200);
+});
+
 app.listen(port, '0.0.0.0', () => {
   console.log(`Server running on port ${port}`);
   console.log('Health check: /health');
