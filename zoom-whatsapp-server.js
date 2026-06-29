@@ -258,25 +258,15 @@ function generateNameWiseJapaReport(participants, config) {
   lines.push(`Total Devotees Attended: ${rows.length}`);
   lines.push('');
 
-  const nameHeader = 'Name'.padEnd(30, ' ');
-  const joinHeader = 'Join Time'.padEnd(12, ' ');
-  const durationHeader = 'Duration (minutes)';
+  rows.forEach((row, index) => {
+    lines.push(`${index + 1}. ${row.name}`);
+    lines.push(
+      `   Join: ${row.firstJoinTime.toFormat('HH:mm')} | Duration: ${row.totalDurationMinutes} mins`
+    );
+    lines.push('');
+  });
 
-  lines.push(`${nameHeader}${joinHeader}${durationHeader}`);
-
-  for (const row of rows) {
-    const nameText = row.name.length > 29
-      ? row.name.substring(0, 29)
-      : row.name;
-
-    const name = nameText.padEnd(30, ' ');
-    const joinTime = row.firstJoinTime.toFormat('HH:mm').padEnd(12, ' ');
-    const duration = String(row.totalDurationMinutes);
-
-    lines.push(`${name}${joinTime}${duration}`);
-  }
-
-  return lines.join('\n');
+  return lines.join('\n').trim();
 }
 
 function verifyZoomSignature(req) {
@@ -428,7 +418,7 @@ async function processMeetingEndedEvent(body) {
   console.log('');
   console.log(finalReport);
   console.log('');
-await sendWhatsAppMessage(finalReport);
+await sendWhatsAppMessage('```\n' + finalReport + '\n```');
 }
 
 app.get('/health', (req, res) => {
