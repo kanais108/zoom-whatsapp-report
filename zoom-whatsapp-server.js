@@ -254,7 +254,7 @@ function generateNameWiseJapaReport(participants, config) {
 
   const lines = [];
 
-  lines.push(`Daily Zoom Jap Report - ${reportDateShort}`);
+  lines.push(`Daily Zoom Japa Report - ${reportDateShort}`);
   lines.push(`Total Devotees Attended: ${rows.length}`);
   lines.push('');
 
