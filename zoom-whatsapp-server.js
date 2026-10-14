@@ -112,6 +112,21 @@ function formatDisplayTime(dateTime) {
   return `${hour12}.${minute}${suffix}`;
 }
 
+function getParticipantDisplayName(participant) {
+  return (
+    participant.name ||
+    participant.user_name ||
+    participant.email ||
+    'Unknown'
+  ).trim();
+}
+
+function getParticipantKey(participant) {
+  return getParticipantDisplayName(participant)
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
 function countParticipantsJoinedUntil(participants, slotDateTime, intervalMinutes, timezone) {
   const uniqueParticipants = new Set();
   const slotEndTime = slotDateTime.plus({ minutes: intervalMinutes });
@@ -126,14 +141,7 @@ function countParticipantsJoinedUntil(participants, slotDateTime, intervalMinute
     }).setZone(timezone);
 
     if (joinTime < slotEndTime) {
-      const participantKey =
-        participant.user_id ||
-        participant.email ||
-        participant.name ||
-        participant.id ||
-        `${participant.name}-${participant.join_time}`;
-
-      uniqueParticipants.add(participantKey);
+      uniqueParticipants.add(getParticipantKey(participant));
     }
   }
 
@@ -219,11 +227,8 @@ function generateNameWiseJapaReport(participants, config) {
       continue;
     }
 
-    const name =
-      participant.name ||
-      participant.user_name ||
-      participant.email ||
-      'Unknown';
+    const name = getParticipantDisplayName(participant);
+    const participantKey = getParticipantKey(participant);
 
     const joinTime = DateTime.fromISO(participant.join_time, {
       zone: 'utc',
@@ -232,10 +237,10 @@ function generateNameWiseJapaReport(participants, config) {
     const durationSeconds = participant.duration || 0;
     const durationMinutes = Math.round(durationSeconds / 60);
 
-    const existing = uniqueMap.get(name);
+    const existing = uniqueMap.get(participantKey);
 
     if (!existing) {
-      uniqueMap.set(name, {
+      uniqueMap.set(participantKey, {
         name,
         firstJoinTime: joinTime,
         totalDurationMinutes: durationMinutes,
@@ -418,7 +423,7 @@ async function processMeetingEndedEvent(body) {
   console.log('');
   console.log(finalReport);
   console.log('');
-await sendWhatsAppMessage('```\n' + finalReport + '\n```');
+  await sendWhatsAppMessage('```\n' + finalReport + '\n```');
 }
 
 app.get('/health', (req, res) => {
@@ -452,10 +457,10 @@ app.post('/zoom/webhook', async (req, res) => {
     }
 
     if (
-  body.event === 'meeting.ended' ||
-  body.event === 'meeting.ended.v2' ||
-  body.event === 'meeting.end'
-) {
+      body.event === 'meeting.ended' ||
+      body.event === 'meeting.ended.v2' ||
+      body.event === 'meeting.end'
+    ) {
       res.status(200).send('Meeting ended received');
 
       processMeetingEndedEvent(body).catch(error => {
