@@ -4,9 +4,186 @@ const express = require('express');
 const axios = require('axios');
 const crypto = require('crypto');
 const { DateTime } = require('luxon');
+const { Pool } = require('pg');
+const session = require('express-session');
 
 const app = express();
+
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET || 'change-this-session-secret',
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: false,
+      maxAge: 1000 * 60 * 60 * 8,
+    },
+  })
+);
+
+const dbPool = process.env.DATABASE_URL
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl:
+        process.env.DATABASE_SSL === 'true'
+          ? { rejectUnauthorized: false }
+          : false,
+    })
+  : null;
+
+function escapeHtml(text) {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
+
+function requireLogin(req, res, next) {
+  if (req.session && req.session.isAdminLoggedIn) {
+    return next();
+  }
+
+  return res.redirect('/login');
+}
+
+async function initializeDatabase() {
+  if (!dbPool) {
+    console.log('DATABASE_URL is missing. Database saving disabled.');
+    return;
+  }
+
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS attendance_reports (
+      id SERIAL PRIMARY KEY,
+      public_id TEXT UNIQUE NOT NULL,
+      report_date TEXT NOT NULL,
+      report_date_short TEXT,
+      session_name TEXT NOT NULL,
+      zoom_meeting_id TEXT,
+      zoom_uuid TEXT,
+      topic TEXT,
+      start_time TEXT,
+      end_time TEXT,
+      timezone TEXT,
+      participant_count INTEGER DEFAULT 0,
+      time_wise_report TEXT,
+      name_wise_report TEXT,
+      final_report TEXT NOT NULL,
+      whatsapp_sent BOOLEAN DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  await dbPool.query(`
+    CREATE TABLE IF NOT EXISTS attendance_records (
+      id SERIAL PRIMARY KEY,
+      report_public_id TEXT NOT NULL,
+      participant_name TEXT NOT NULL,
+      join_time TEXT,
+      duration_minutes INTEGER DEFAULT 0,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+
+  console.log('Database initialized successfully');
+}
+
+function generatePublicReportId() {
+  return crypto.randomBytes(12).toString('hex');
+}
+
+async function saveAttendanceReport({
+  config,
+  meetingId,
+  meetingUuid,
+  topic,
+  participantRows,
+  timeWiseReport,
+  nameWiseReport,
+  finalReport,
+  whatsappSent,
+}) {
+  if (!dbPool) {
+    console.log('DATABASE_URL is missing. Skipping report save.');
+    return null;
+  }
+
+  const publicId = generatePublicReportId();
+
+  const result = await dbPool.query(
+    `
+      INSERT INTO attendance_reports (
+        public_id,
+        report_date,
+        report_date_short,
+        session_name,
+        zoom_meeting_id,
+        zoom_uuid,
+        topic,
+        start_time,
+        end_time,
+        timezone,
+        participant_count,
+        time_wise_report,
+        name_wise_report,
+        final_report,
+        whatsapp_sent
+      )
+      VALUES (
+        $1, $2, $3, $4, $5,
+        $6, $7, $8, $9, $10,
+        $11, $12, $13, $14, $15
+      )
+      RETURNING id, public_id;
+    `,
+    [
+      publicId,
+      config.reportDate,
+      config.reportDateShort,
+      config.sessionName,
+      meetingId,
+      meetingUuid,
+      topic,
+      config.startTime,
+      config.endTime,
+      config.timezone,
+      participantRows.length,
+      timeWiseReport,
+      nameWiseReport,
+      finalReport,
+      whatsappSent,
+    ]
+  );
+
+  for (const row of participantRows) {
+    await dbPool.query(
+      `
+        INSERT INTO attendance_records (
+          report_public_id,
+          participant_name,
+          join_time,
+          duration_minutes
+        )
+        VALUES ($1, $2, $3, $4);
+      `,
+      [
+        publicId,
+        row.name,
+        row.firstJoinTime.toFormat('HH:mm'),
+        row.totalDurationMinutes,
+      ]
+    );
+  }
+
+  return result.rows[0];
+}
 
 async function getZoomAccessToken() {
   const accountId = process.env.ZOOM_ACCOUNT_ID;
@@ -127,6 +304,45 @@ function getParticipantKey(participant) {
     .replace(/\s+/g, ' ');
 }
 
+function getMergedParticipantRows(participants, timezone) {
+  const uniqueMap = new Map();
+
+  for (const participant of participants) {
+    if (!participant.join_time) {
+      continue;
+    }
+
+    const name = getParticipantDisplayName(participant);
+    const participantKey = getParticipantKey(participant);
+
+    const joinTime = DateTime.fromISO(participant.join_time, {
+      zone: 'utc',
+    }).setZone(timezone);
+
+    const durationSeconds = participant.duration || 0;
+    const durationMinutes = Math.round(durationSeconds / 60);
+
+    const existing = uniqueMap.get(participantKey);
+
+    if (!existing) {
+      uniqueMap.set(participantKey, {
+        name,
+        firstJoinTime: joinTime,
+        totalDurationMinutes: durationMinutes,
+      });
+    } else {
+      if (joinTime < existing.firstJoinTime) {
+        existing.firstJoinTime = joinTime;
+      }
+
+      existing.totalDurationMinutes += durationMinutes;
+    }
+  }
+
+  return Array.from(uniqueMap.values())
+    .sort((a, b) => a.firstJoinTime.toMillis() - b.firstJoinTime.toMillis());
+}
+
 function countParticipantsJoinedUntil(participants, slotDateTime, intervalMinutes, timezone) {
   const uniqueParticipants = new Set();
   const slotEndTime = slotDateTime.plus({ minutes: intervalMinutes });
@@ -218,48 +434,11 @@ function generateTimeWiseReport(participants, config) {
 }
 
 function generateNameWiseJapaReport(participants, config) {
-  const { reportDateShort, timezone } = config;
-
-  const uniqueMap = new Map();
-
-  for (const participant of participants) {
-    if (!participant.join_time) {
-      continue;
-    }
-
-    const name = getParticipantDisplayName(participant);
-    const participantKey = getParticipantKey(participant);
-
-    const joinTime = DateTime.fromISO(participant.join_time, {
-      zone: 'utc',
-    }).setZone(timezone);
-
-    const durationSeconds = participant.duration || 0;
-    const durationMinutes = Math.round(durationSeconds / 60);
-
-    const existing = uniqueMap.get(participantKey);
-
-    if (!existing) {
-      uniqueMap.set(participantKey, {
-        name,
-        firstJoinTime: joinTime,
-        totalDurationMinutes: durationMinutes,
-      });
-    } else {
-      if (joinTime < existing.firstJoinTime) {
-        existing.firstJoinTime = joinTime;
-      }
-
-      existing.totalDurationMinutes += durationMinutes;
-    }
-  }
-
-  const rows = Array.from(uniqueMap.values())
-    .sort((a, b) => a.firstJoinTime.toMillis() - b.firstJoinTime.toMillis());
+  const rows = getMergedParticipantRows(participants, config.timezone);
 
   const lines = [];
 
-  lines.push(`Daily Zoom Japa Report - ${reportDateShort}`);
+  lines.push(`Daily Zoom Japa Report - ${config.reportDateShort}`);
   lines.push(`Total Devotees Attended: ${rows.length}`);
   lines.push('');
 
@@ -321,7 +500,6 @@ function handleZoomUrlValidation(body) {
     encryptedToken,
   };
 }
-
 async function sendWhatsAppMessage(text) {
   if (
     !process.env.META_WHATSAPP_TOKEN ||
@@ -365,15 +543,9 @@ async function processMeetingEndedEvent(body) {
   const dailyJapaMeetingId = String(process.env.DAILY_JAPA_MEETING_ID || '').replace(/\s/g, '');
   const dailyJapaTopic = process.env.DAILY_JAPA_TOPIC || 'Daily Zoom Japa';
 
-  if (
-    meetingIdFromZoom !== dailyJapaMeetingId &&
-    topic !== dailyJapaTopic
-  ) {
-    console.log('Meeting ignored because it is not Daily Zoom Japa');
-    console.log('Topic:', topic);
-    console.log('Meeting ID:', meetingIdFromZoom);
-    return;
-  }
+  const isDailyJapaMeeting =
+    meetingIdFromZoom === dailyJapaMeetingId ||
+    topic === dailyJapaTopic;
 
   const timezone = process.env.REPORT_TIMEZONE || 'Europe/London';
   const intervalMinutes = Number(process.env.REPORT_INTERVAL_MINUTES || 15);
@@ -396,7 +568,7 @@ async function processMeetingEndedEvent(body) {
     timezone,
   };
 
-  console.log('Daily Japa meeting ended event received');
+  console.log('Meeting ended event received');
   console.log('Topic:', topic);
   console.log('Meeting ID:', meetingIdFromZoom);
   console.log('Meeting UUID:', meetingUuid);
@@ -412,6 +584,7 @@ async function processMeetingEndedEvent(body) {
 
   console.log('Participants fetched:', participants.length);
 
+  const participantRows = getMergedParticipantRows(participants, config.timezone);
   const timeWiseReport = generateTimeWiseReport(participants, config);
   const nameWiseReport = generateNameWiseJapaReport(participants, config);
 
@@ -423,11 +596,630 @@ async function processMeetingEndedEvent(body) {
   console.log('');
   console.log(finalReport);
   console.log('');
-  await sendWhatsAppMessage('```\n' + finalReport + '\n```');
+
+  let whatsappSent = false;
+
+  if (isDailyJapaMeeting) {
+    try {
+      await sendWhatsAppMessage('```\n' + finalReport + '\n```');
+      whatsappSent = true;
+    } catch (error) {
+      console.error('WhatsApp send failed, but report will still be saved');
+
+      if (error.response) {
+        console.error('Status:', error.response.status);
+        console.error('Response:', JSON.stringify(error.response.data, null, 2));
+      } else {
+        console.error(error.message);
+      }
+    }
+  } else {
+    console.log('WhatsApp skipped because this is not Daily Zoom Japa');
+  }
+
+  try {
+    const savedReport = await saveAttendanceReport({
+      config,
+      meetingId: meetingIdFromZoom,
+      meetingUuid,
+      topic,
+      participantRows,
+      timeWiseReport,
+      nameWiseReport,
+      finalReport,
+      whatsappSent,
+    });
+
+    if (savedReport) {
+      const baseUrl =
+        process.env.PUBLIC_BASE_URL ||
+        'https://zoom-whatsapp-report-production.up.railway.app';
+
+      const reportUrl = `${baseUrl}/admin/reports/${savedReport.public_id}`;
+
+      console.log('Attendance report saved successfully');
+      console.log('Report URL:', reportUrl);
+    }
+  } catch (error) {
+    console.error('Failed to save attendance report:', error.message);
+  }
 }
 
 app.get('/health', (req, res) => {
   res.send('Zoom WhatsApp server is running');
+});
+
+app.get('/login', (req, res) => {
+  const error = req.query.error ? 'Invalid username or password' : '';
+
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+  return res.send(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Daily Japa Reports Login</title>
+        <style>
+          body {
+            font-family: Arial, sans-serif;
+            background: #f3f4f6;
+            margin: 0;
+            padding: 20px;
+          }
+
+          .box {
+            max-width: 380px;
+            margin: 80px auto;
+            background: #ffffff;
+            padding: 28px;
+            border-radius: 12px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+          }
+
+          h1 {
+            margin-top: 0;
+            font-size: 24px;
+            text-align: center;
+          }
+
+          label {
+            display: block;
+            margin-top: 14px;
+            font-weight: bold;
+          }
+
+          input {
+            width: 100%;
+            padding: 10px;
+            margin-top: 6px;
+            box-sizing: border-box;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+          }
+
+          button {
+            width: 100%;
+            margin-top: 20px;
+            padding: 11px;
+            border: 0;
+            border-radius: 8px;
+            background: #111827;
+            color: #ffffff;
+            font-size: 16px;
+            cursor: pointer;
+          }
+
+          .error {
+            color: #b91c1c;
+            margin-top: 12px;
+            text-align: center;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="box">
+          <h1>Daily Japa Reports</h1>
+
+          <form method="POST" action="/login">
+            <label>Username</label>
+            <input type="text" name="username" required />
+
+            <label>Password</label>
+            <input type="password" name="password" required />
+
+            <button type="submit">Login</button>
+          </form>
+
+          ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
+        </div>
+      </body>
+    </html>
+  `);
+});
+
+app.post('/login', (req, res) => {
+  const username = req.body.username || '';
+  const password = req.body.password || '';
+
+  const adminUsername = process.env.ADMIN_USERNAME || 'admin';
+  const adminPassword = process.env.ADMIN_PASSWORD || '';
+
+  if (username === adminUsername && password === adminPassword) {
+    req.session.isAdminLoggedIn = true;
+    return res.redirect('/admin/reports');
+  }
+
+  return res.redirect('/login?error=1');
+});
+
+app.post('/logout', (req, res) => {
+  req.session.destroy(() => {
+    res.redirect('/login');
+  });
+});
+
+app.get('/', (req, res) => {
+  return res.redirect('/admin/reports');
+});
+
+app.get('/admin/reports', requireLogin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(500).send('Database is not configured');
+    }
+
+    const date = req.query.date || '';
+    const topic = req.query.topic || '';
+    const meetingId = req.query.meetingId || '';
+
+    const conditions = [];
+    const params = [];
+
+    if (date) {
+      params.push(date);
+      conditions.push(`report_date = $${params.length}`);
+    }
+
+    if (topic) {
+      params.push(`%${topic}%`);
+      conditions.push(`topic ILIKE $${params.length}`);
+    }
+
+    if (meetingId) {
+      params.push(`%${meetingId}%`);
+      conditions.push(`zoom_meeting_id ILIKE $${params.length}`);
+    }
+
+    const whereClause = conditions.length
+      ? `WHERE ${conditions.join(' AND ')}`
+      : '';
+
+    const result = await dbPool.query(
+      `
+        SELECT
+          public_id,
+          report_date,
+          session_name,
+          zoom_meeting_id,
+          topic,
+          start_time,
+          end_time,
+          participant_count,
+          whatsapp_sent,
+          created_at
+        FROM attendance_reports
+        ${whereClause}
+        ORDER BY created_at DESC
+        LIMIT 200;
+      `,
+      params
+    );
+
+    const rowsHtml = result.rows.map(report => `
+      <tr>
+        <td>${escapeHtml(report.report_date)}</td>
+        <td>${escapeHtml(report.session_name)}</td>
+        <td>${escapeHtml(report.zoom_meeting_id)}</td>
+        <td>${escapeHtml(report.start_time)} - ${escapeHtml(report.end_time)}</td>
+        <td>${escapeHtml(report.participant_count)}</td>
+        <td>${report.whatsapp_sent ? 'Yes' : 'No'}</td>
+        <td>
+          <a href="/admin/reports/${report.public_id}">View</a>
+          |
+          <a href="/admin/reports/${report.public_id}/download">Download</a>
+        </td>
+      </tr>
+    `).join('');
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Attendance Reports</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              background: #f3f4f6;
+              margin: 0;
+              padding: 20px;
+            }
+
+            .container {
+              max-width: 1100px;
+              margin: 0 auto;
+              background: #ffffff;
+              padding: 24px;
+              border-radius: 12px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            }
+
+            .topbar {
+              display: flex;
+              justify-content: space-between;
+              align-items: center;
+              gap: 12px;
+              flex-wrap: wrap;
+            }
+
+            h1 {
+              margin: 0 0 20px 0;
+              font-size: 26px;
+            }
+
+            form.filter {
+              display: flex;
+              gap: 10px;
+              flex-wrap: wrap;
+              margin-bottom: 18px;
+            }
+
+            input {
+              padding: 9px;
+              border: 1px solid #d1d5db;
+              border-radius: 8px;
+            }
+
+            button, .button {
+              padding: 9px 13px;
+              border: 0;
+              border-radius: 8px;
+              background: #111827;
+              color: #ffffff;
+              text-decoration: none;
+              cursor: pointer;
+            }
+
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 12px;
+            }
+
+            th, td {
+              border-bottom: 1px solid #e5e7eb;
+              padding: 10px;
+              text-align: left;
+              font-size: 14px;
+            }
+
+            th {
+              background: #f9fafb;
+            }
+
+            a {
+              color: #1d4ed8;
+            }
+
+            .logout {
+              display: inline;
+            }
+
+            .logout button {
+              background: #6b7280;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="topbar">
+              <h1>Attendance Reports</h1>
+
+              <form class="logout" method="POST" action="/logout">
+                <button type="submit">Logout</button>
+              </form>
+            </div>
+
+            <form class="filter" method="GET" action="/admin/reports">
+              <input type="text" name="date" placeholder="Date e.g. 04/08/2026" value="${escapeHtml(date)}" />
+              <input type="text" name="topic" placeholder="Topic" value="${escapeHtml(topic)}" />
+              <input type="text" name="meetingId" placeholder="Meeting ID" value="${escapeHtml(meetingId)}" />
+              <button type="submit">Filter</button>
+              <a class="button" href="/admin/reports">Clear</a>
+            </form>
+
+            <table>
+              <thead>
+                <tr>
+                  <th>Date</th>
+                  <th>Session</th>
+                  <th>Meeting ID</th>
+                  <th>Time</th>
+                  <th>Participants</th>
+                  <th>WhatsApp Sent</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  rowsHtml ||
+                  '<tr><td colspan="7">No reports found yet.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('Failed to load reports:', error.message);
+    return res.status(500).send('Failed to load reports');
+  }
+});
+
+app.get('/admin/reports/:publicId', requireLogin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(500).send('Database is not configured');
+    }
+
+    const publicId = req.params.publicId;
+
+    const result = await dbPool.query(
+      `
+        SELECT *
+        FROM attendance_reports
+        WHERE public_id = $1;
+      `,
+      [publicId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send('Report not found');
+    }
+
+    const report = result.rows[0];
+
+    const recordsResult = await dbPool.query(
+      `
+        SELECT participant_name, join_time, duration_minutes
+        FROM attendance_records
+        WHERE report_public_id = $1
+        ORDER BY id ASC;
+      `,
+      [publicId]
+    );
+
+    const recordsHtml = recordsResult.rows.map((record, index) => `
+      <tr>
+        <td>${index + 1}</td>
+        <td>${escapeHtml(record.participant_name)}</td>
+        <td>${escapeHtml(record.join_time)}</td>
+        <td>${escapeHtml(record.duration_minutes)} mins</td>
+      </tr>
+    `).join('');
+
+    const whatsappText = '```\n' + report.final_report + '\n```';
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Report - ${escapeHtml(report.report_date)}</title>
+          <style>
+            body {
+              font-family: Arial, sans-serif;
+              background: #f3f4f6;
+              margin: 0;
+              padding: 20px;
+            }
+
+            .container {
+              max-width: 1000px;
+              margin: 0 auto;
+              background: #ffffff;
+              padding: 24px;
+              border-radius: 12px;
+              box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+            }
+
+            h1 {
+              margin-top: 0;
+              font-size: 26px;
+            }
+
+            .meta {
+              color: #374151;
+              line-height: 1.7;
+              margin-bottom: 18px;
+            }
+
+            .actions {
+              display: flex;
+              gap: 10px;
+              flex-wrap: wrap;
+              margin: 18px 0;
+            }
+
+            .button, button {
+              padding: 9px 13px;
+              border: 0;
+              border-radius: 8px;
+              background: #111827;
+              color: #ffffff;
+              text-decoration: none;
+              cursor: pointer;
+              font-size: 14px;
+            }
+
+            .secondary {
+              background: #6b7280;
+            }
+
+            pre {
+              background: #111827;
+              color: #f9fafb;
+              padding: 16px;
+              border-radius: 8px;
+              overflow-x: auto;
+              white-space: pre-wrap;
+              word-wrap: break-word;
+              font-size: 14px;
+              line-height: 1.5;
+            }
+
+            table {
+              width: 100%;
+              border-collapse: collapse;
+              margin-top: 18px;
+            }
+
+            th, td {
+              border-bottom: 1px solid #e5e7eb;
+              padding: 9px;
+              text-align: left;
+              font-size: 14px;
+            }
+
+            th {
+              background: #f9fafb;
+            }
+
+            a {
+              color: #1d4ed8;
+            }
+
+            textarea {
+              position: absolute;
+              left: -9999px;
+            }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <a href="/admin/reports">← Back to reports</a>
+
+            <h1>Attendance Report</h1>
+
+            <div class="meta">
+              <strong>Date:</strong> ${escapeHtml(report.report_date)}<br/>
+              <strong>Session:</strong> ${escapeHtml(report.session_name)}<br/>
+              <strong>Topic:</strong> ${escapeHtml(report.topic)}<br/>
+              <strong>Meeting ID:</strong> ${escapeHtml(report.zoom_meeting_id)}<br/>
+              <strong>Meeting UUID:</strong> ${escapeHtml(report.zoom_uuid)}<br/>
+              <strong>Time:</strong> ${escapeHtml(report.start_time)} - ${escapeHtml(report.end_time)}<br/>
+              <strong>Participants:</strong> ${escapeHtml(report.participant_count)}<br/>
+              <strong>WhatsApp Sent:</strong> ${report.whatsapp_sent ? 'Yes' : 'No'}<br/>
+              <strong>Created:</strong> ${escapeHtml(report.created_at)}
+            </div>
+
+            <div class="actions">
+              <a class="button" href="/admin/reports/${report.public_id}/download">Download .txt</a>
+              <button type="button" onclick="copyReport()">Copy WhatsApp Report</button>
+              <a class="button secondary" href="/admin/reports">Back</a>
+            </div>
+
+            <textarea id="copyText">${escapeHtml(whatsappText)}</textarea>
+
+            <h2>Full Report</h2>
+            <pre>${escapeHtml(report.final_report)}</pre>
+
+            <h2>Participant Records</h2>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Name</th>
+                  <th>Join</th>
+                  <th>Duration</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  recordsHtml ||
+                  '<tr><td colspan="4">No participant records found.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+
+          <script>
+            function copyReport() {
+              const text = document.getElementById('copyText').value;
+
+              if (navigator.clipboard) {
+                navigator.clipboard.writeText(text).then(function () {
+                  alert('WhatsApp report copied.');
+                });
+                return;
+              }
+
+              const textarea = document.getElementById('copyText');
+              textarea.select();
+              document.execCommand('copy');
+              alert('WhatsApp report copied.');
+            }
+          </script>
+        </body>
+      </html>
+    `);
+  } catch (error) {
+    console.error('Failed to load report:', error.message);
+    return res.status(500).send('Failed to load report');
+  }
+});
+
+app.get('/admin/reports/:publicId/download', requireLogin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(500).send('Database is not configured');
+    }
+
+    const publicId = req.params.publicId;
+
+    const result = await dbPool.query(
+      `
+        SELECT *
+        FROM attendance_reports
+        WHERE public_id = $1;
+      `,
+      [publicId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send('Report not found');
+    }
+
+    const report = result.rows[0];
+    const filename = `attendance-report-${report.report_date.replace(/\//g, '-')}.txt`;
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    return res.send(report.final_report);
+  } catch (error) {
+    console.error('Failed to download report:', error.message);
+    return res.status(500).send('Failed to download report');
+  }
 });
 
 app.get('/debug/env', (req, res) => {
@@ -436,6 +1228,7 @@ app.get('/debug/env', (req, res) => {
     hasZoomClientId: !!process.env.ZOOM_CLIENT_ID,
     hasZoomClientSecret: !!process.env.ZOOM_CLIENT_SECRET,
     hasZoomWebhookSecretToken: !!process.env.ZOOM_WEBHOOK_SECRET_TOKEN,
+    hasDatabaseUrl: !!process.env.DATABASE_URL,
     dailyJapaMeetingId: process.env.DAILY_JAPA_MEETING_ID || null,
     timezone: process.env.REPORT_TIMEZONE || null,
   });
@@ -548,7 +1341,13 @@ app.post('/meta/webhook', (req, res) => {
   return res.sendStatus(200);
 });
 
-app.listen(port, '0.0.0.0', () => {
+app.listen(port, '0.0.0.0', async () => {
   console.log(`Server running on port ${port}`);
   console.log('Health check: /health');
+
+  try {
+    await initializeDatabase();
+  } catch (error) {
+    console.error('Database initialization failed:', error.message);
+  }
 });
