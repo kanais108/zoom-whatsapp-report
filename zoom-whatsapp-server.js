@@ -6,11 +6,13 @@ const crypto = require('crypto');
 const { DateTime } = require('luxon');
 const { Pool } = require('pg');
 const session = require('express-session');
+const path = require('path');
 
 const app = express();
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use('/public', express.static(path.join(__dirname, 'public')));
 
 app.use(
   session({
@@ -754,85 +756,221 @@ app.get('/login', (req, res) => {
       <head>
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <title>Daily Japa Reports Login</title>
+        <title>ISKCON READING Attendance Reports</title>
         <style>
           body {
-            font-family: Arial, sans-serif;
-            background: #f3f4f6;
             margin: 0;
+            font-family: Arial, sans-serif;
+            background: linear-gradient(135deg, #fff7ed, #fde68a, #dcfce7);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
             padding: 20px;
           }
 
-          .box {
-            max-width: 380px;
-            margin: 80px auto;
-            background: #ffffff;
-            padding: 28px;
-            border-radius: 12px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+          .login-wrapper {
+            width: 100%;
+            max-width: 900px;
+          }
+
+          .login-card {
+            background: rgba(255,255,255,0.96);
+            border-radius: 26px;
+            box-shadow: 0 14px 40px rgba(0,0,0,0.14);
+            overflow: hidden;
+            border: 1px solid #fde68a;
+          }
+
+          .top-banner {
+            background: linear-gradient(90deg, #7c2d12, #b45309, #92400e);
+            padding: 18px 24px;
+            text-align: center;
+          }
+
+          .mahamantra {
+            font-size: 18px;
+            font-weight: bold;
+            color: #fff7ed;
+            line-height: 1.5;
+            letter-spacing: 0.2px;
+          }
+
+          .card-body {
+            padding: 32px 42px 42px;
+          }
+
+          .logo-row {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 28px;
+            flex-wrap: wrap;
+            margin-bottom: 18px;
+          }
+
+          .iskcon-logo {
+            height: 88px;
+            width: 88px;
+            object-fit: contain;
+          }
+
+          .prabhupada-logo {
+            height: 96px;
+            width: 96px;
+            object-fit: cover;
+            border-radius: 50%;
+            border: 4px solid #fcd34d;
+            background: #fff7ed;
+            box-shadow: 0 4px 14px rgba(0,0,0,0.12);
           }
 
           h1 {
-            margin-top: 0;
-            font-size: 24px;
             text-align: center;
+            font-size: 42px;
+            margin: 10px 0 8px;
+            color: #111827;
+          }
+
+          .subtitle {
+            text-align: center;
+            font-size: 18px;
+            color: #4b5563;
+            margin-bottom: 30px;
           }
 
           label {
             display: block;
-            margin-top: 14px;
-            font-weight: bold;
+            font-size: 22px;
+            font-weight: 700;
+            margin-bottom: 10px;
+            color: #111827;
           }
 
-          input {
+          input[type="text"],
+          input[type="password"] {
             width: 100%;
-            padding: 10px;
-            margin-top: 6px;
             box-sizing: border-box;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
+            padding: 17px 20px;
+            font-size: 20px;
+            border: 2px solid #d1d5db;
+            border-radius: 16px;
+            margin-bottom: 24px;
+            outline: none;
+            transition: 0.2s ease;
+            background: #ffffff;
+          }
+
+          input[type="text"]:focus,
+          input[type="password"]:focus {
+            border-color: #f59e0b;
+            box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18);
           }
 
           button {
             width: 100%;
-            margin-top: 20px;
-            padding: 11px;
+            padding: 18px 20px;
+            font-size: 24px;
+            font-weight: 700;
             border: 0;
-            border-radius: 8px;
-            background: #111827;
-            color: #ffffff;
-            font-size: 16px;
+            border-radius: 16px;
+            background: linear-gradient(90deg, #0f172a, #1e3a8a);
+            color: white;
             cursor: pointer;
+          }
+
+          button:hover {
+            opacity: 0.95;
           }
 
           .error {
             color: #b91c1c;
-            margin-top: 12px;
+            background: #fee2e2;
+            border: 1px solid #fecaca;
+            padding: 12px 16px;
+            border-radius: 12px;
+            margin-bottom: 18px;
             text-align: center;
+            font-size: 16px;
+          }
+
+          @media (max-width: 640px) {
+            h1 {
+              font-size: 30px;
+            }
+
+            .card-body {
+              padding: 24px;
+            }
+
+            .mahamantra {
+              font-size: 14px;
+            }
+
+            label {
+              font-size: 18px;
+            }
+
+            input[type="text"],
+            input[type="password"] {
+              font-size: 18px;
+              padding: 14px 16px;
+            }
+
+            button {
+              font-size: 20px;
+              padding: 16px;
+            }
+
+            .iskcon-logo {
+              height: 70px;
+              width: 70px;
+            }
+
+            .prabhupada-logo {
+              height: 78px;
+              width: 78px;
+            }
           }
         </style>
       </head>
       <body>
-        <div class="box">
-          <h1>Daily Japa Reports</h1>
+        <div class="login-wrapper">
+          <div class="login-card">
+            <div class="top-banner">
+              <div class="mahamantra">
+                Hare Krishna Hare Krishna Krishna Krishna Hare Hare<br/>
+                Hare Rama Hare Rama Rama Rama Hare Hare
+              </div>
+            </div>
 
-          <form method="POST" action="/login">
-            <label>Username</label>
-            <input type="text" name="username" required />
+            <div class="card-body">
+              <div class="logo-row">
+                <img class="iskcon-logo" src="/public/images/iskcon-logo.png" alt="ISKCON Logo" />
+                <img class="prabhupada-logo" src="/public/images/prabhupada-icon.png" alt="Srila Prabhupada" />
+              </div>
 
-            <label>Password</label>
-            <input type="password" name="password" required />
+              <h1>ISKCON READING Attendance Reports</h1>
+              <div class="subtitle">Zoom attendance management for all meeting IDs</div>
 
-            <button type="submit">Login</button>
-          </form>
+              ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
 
-          ${error ? `<div class="error">${escapeHtml(error)}</div>` : ''}
+              <form method="POST" action="/login">
+                <label>Username</label>
+                <input type="text" name="username" required />
+
+                <label>Password</label>
+                <input type="password" name="password" required />
+
+                <button type="submit">Login</button>
+              </form>
+            </div>
+          </div>
         </div>
       </body>
     </html>
   `);
 });
-
 app.post('/login', (req, res) => {
   const username = req.body.username || '';
   const password = req.body.password || '';
@@ -1103,6 +1241,70 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
               box-shadow: 0 2px 10px rgba(0,0,0,0.08);
             }
 
+            .devotional-header {
+            background: linear-gradient(90deg, #fff7ed, #fde68a, #dcfce7);
+            border: 1px solid #fcd34d;
+            border-radius: 18px;
+            padding: 18px 22px;
+            margin-bottom: 24px;
+            }
+
+           .mantra {
+           text-align: center;
+           font-weight: bold;
+           color: #7c2d12;
+           line-height: 1.6;
+           margin-bottom: 16px;
+           font-size: 17px;
+           }
+
+          .header-main {
+           display: flex;
+           align-items: center;
+           justify-content: space-between;
+           gap: 20px;
+          flex-wrap: wrap;
+           }
+
+          .header-logos {
+           display: flex;
+           gap: 16px;
+           align-items: center;
+           }
+
+          .header-logos .iskcon-logo {
+          height: 72px;
+           width: 72px;
+           object-fit: contain;
+           }
+
+.header-logos .prabhupada-logo {
+  height: 78px;
+  width: 78px;
+  object-fit: cover;
+  border-radius: 50%;
+  border: 3px solid #fcd34d;
+  background: #fff7ed;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.12);
+}
+
+.header-text {
+  flex: 1;
+  min-width: 260px;
+}
+
+.header-text h1 {
+  margin: 0;
+  font-size: 34px;
+  color: #111827;
+}
+
+.header-text p {
+  margin: 8px 0 0;
+  color: #4b5563;
+  font-size: 16px;
+}
+
             .topbar {
               display: flex;
               justify-content: space-between;
@@ -1122,11 +1324,11 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
             }
 
             .generate-box {
-              background: #f9fafb;
-              border: 1px solid #e5e7eb;
-              border-radius: 12px;
-              padding: 16px;
-              margin-bottom: 22px;
+            background: linear-gradient(135deg, #fff7ed, #fffbeb);
+            border: 1px solid #fcd34d;
+            border-radius: 16px;
+            padding: 18px;
+            margin-bottom: 22px;
             }
 
             .generate-form {
@@ -1218,17 +1420,33 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
         </head>
         <body>
           <div class="container">
-            <div class="topbar">
-              <h1>Attendance Reports</h1>
+          <div class="devotional-header">
+  <div class="mantra">
+    Hare Krishna Hare Krishna Krishna Krishna Hare Hare
+    <br />
+    Hare Rama Hare Rama Rama Rama Hare Hare
+  </div>
 
-              <form class="logout" method="POST" action="/logout">
-                <button type="submit">Logout</button>
-              </form>
-            </div>
+  <div class="header-main">
+    <div class="header-logos">
+      <img class="iskcon-logo" src="/public/images/iskcon-logo.png" alt="ISKCON Logo" />
+      <img class="prabhupada-logo" src="/public/images/prabhupada-icon.png" alt="Srila Prabhupada" />
+    </div>
 
-            ${generateSectionHtml}
+    <div class="header-text">
+      <h1>ISKCON READING Attendance Reports</h1>
+      <p>Manage Zoom attendance reports for all meeting IDs</p>
+    </div>
 
-            <h2>Saved Reports</h2>
+    <form class="logout" method="POST" action="/logout">
+      <button type="submit">Logout</button>
+    </form>
+  </div>
+</div>
+
+${generateSectionHtml}
+
+<h2>Saved Reports</h2>
 
             <form class="filter" method="GET" action="/admin/reports">
               <input type="text" name="date" placeholder="Date e.g. 04/08/2026" value="${escapeHtml(date)}" />
