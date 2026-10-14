@@ -258,6 +258,85 @@ async function getMeetingParticipants(meetingUuid) {
   return allParticipants;
 }
 
+async function getZoomMeetingsForDate(dateIso) {
+  const token = await getZoomAccessToken();
+  const zoomUserId = process.env.ZOOM_REPORT_USER_ID;
+
+  if (!zoomUserId) {
+    throw new Error('ZOOM_REPORT_USER_ID is missing');
+  }
+
+  const encodedUserId = encodeURIComponent(zoomUserId);
+
+  const allMeetings = [];
+  let nextPageToken = '';
+
+  do {
+    const response = await axios.get(
+      `https://api.zoom.us/v2/report/users/${encodedUserId}/meetings`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        params: {
+          from: dateIso,
+          to: dateIso,
+          page_size: 300,
+          next_page_token: nextPageToken || undefined,
+        },
+      }
+    );
+
+    allMeetings.push(...(response.data.meetings || []));
+    nextPageToken = response.data.next_page_token || '';
+  } while (nextPageToken);
+
+  return allMeetings;
+}
+
+function normalizeMeetingForReport(meeting) {
+  if (meeting.end_time) {
+    return meeting;
+  }
+
+  const startTime = DateTime.fromISO(meeting.start_time, {
+    zone: 'utc',
+  });
+
+  const durationMinutes = Number(meeting.duration || 0);
+
+  return {
+    ...meeting,
+    end_time: startTime
+      .plus({ minutes: durationMinutes })
+      .toUTC()
+      .toISO({ suppressMilliseconds: true }),
+  };
+}
+
+function encodeMeetingForForm(meeting) {
+  return Buffer.from(JSON.stringify(meeting), 'utf8').toString('base64');
+}
+
+function decodeMeetingFromForm(value) {
+  return JSON.parse(Buffer.from(value, 'base64').toString('utf8'));
+}
+
+function getMeetingDropdownLabel(meeting, timezone) {
+  const startTime = meeting.start_time
+    ? DateTime.fromISO(meeting.start_time, { zone: 'utc' })
+        .setZone(timezone)
+        .toFormat('HH:mm')
+    : 'Unknown';
+
+  const topic = meeting.topic || 'Untitled meeting';
+  const meetingId = String(meeting.id || '').replace(/\s/g, '');
+  const duration = meeting.duration ? `${meeting.duration} mins` : 'duration unknown';
+
+  return `${startTime} - ${topic} - ${meetingId} - ${duration}`;
+}
+
+
 function roundUpToNextInterval(dateTime, intervalMinutes) {
   const minute = dateTime.minute;
   const remainder = minute % intervalMinutes;
@@ -779,6 +858,92 @@ app.get('/', (req, res) => {
   return res.redirect('/admin/reports');
 });
 
+app.post('/admin/reports/generate', requireLogin, async (req, res) => {
+  try {
+    if (!dbPool) {
+      return res.status(500).send('Database is not configured');
+    }
+
+    const rawMeeting = decodeMeetingFromForm(req.body.meetingData);
+    const meeting = normalizeMeetingForReport(rawMeeting);
+
+    const meetingUuid = meeting.uuid;
+    const topic = meeting.topic || 'Zoom Meeting';
+    const meetingIdFromZoom = String(meeting.id || '').replace(/\s/g, '');
+
+    if (!meetingUuid) {
+      return res.status(400).send('Selected meeting does not have a Zoom UUID');
+    }
+
+    const timezone = process.env.REPORT_TIMEZONE || 'Europe/London';
+    const intervalMinutes = Number(process.env.REPORT_INTERVAL_MINUTES || 15);
+
+    const dynamicRange = getDynamicReportTimeRange(
+      meeting,
+      timezone,
+      intervalMinutes
+    );
+
+    const config = {
+      reportTitle: process.env.REPORT_TITLE || 'Daily Zoom Japa Attendance',
+      batchName: process.env.BATCH_NAME || 'Daily Japa Report',
+      reportDate: dynamicRange.reportDate,
+      reportDateShort: dynamicRange.reportDateShort,
+      sessionName: topic,
+      startTime: dynamicRange.startTime,
+      endTime: dynamicRange.endTime,
+      intervalMinutes,
+      timezone,
+    };
+
+    console.log('Manual report generation started');
+    console.log('Topic:', topic);
+    console.log('Meeting ID:', meetingIdFromZoom);
+    console.log('Meeting UUID:', meetingUuid);
+    console.log('Report date:', config.reportDate);
+
+    const participants = await getMeetingParticipants(meetingUuid);
+
+    console.log('Participants fetched:', participants.length);
+
+    const participantRows = getMergedParticipantRows(participants, config.timezone);
+    const timeWiseReport = generateTimeWiseReport(participants, config);
+    const nameWiseReport = generateNameWiseJapaReport(participants, config);
+
+    const finalReport =
+      timeWiseReport +
+      '\n\n----------------------------\n\n' +
+      nameWiseReport;
+
+    const savedReport = await saveAttendanceReport({
+      config,
+      meetingId: meetingIdFromZoom,
+      meetingUuid,
+      topic,
+      participantRows,
+      timeWiseReport,
+      nameWiseReport,
+      finalReport,
+      whatsappSent: false,
+    });
+
+    if (!savedReport) {
+      return res.status(500).send('Report could not be saved');
+    }
+
+    return res.redirect(`/admin/reports/${savedReport.public_id}`);
+  } catch (error) {
+    console.error('Manual report generation failed:', error.message);
+
+    if (error.response) {
+      console.error('Status:', error.response.status);
+      console.error('Response:', JSON.stringify(error.response.data, null, 2));
+    }
+
+    return res.status(500).send(`Manual report generation failed: ${escapeHtml(error.message)}`);
+  }
+});
+
 app.get('/admin/reports', requireLogin, async (req, res) => {
   try {
     if (!dbPool) {
@@ -788,6 +953,70 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
     const date = req.query.date || '';
     const topic = req.query.topic || '';
     const meetingId = req.query.meetingId || '';
+    const generateDate = req.query.generateDate || '';
+
+    const timezone = process.env.REPORT_TIMEZONE || 'Europe/London';
+
+    let zoomMeetings = [];
+    let generateError = '';
+
+    if (generateDate) {
+      try {
+        zoomMeetings = await getZoomMeetingsForDate(generateDate);
+      } catch (err) {
+        console.error('Failed to fetch Zoom meetings:', err.message);
+        generateError = err.message;
+      }
+    }
+
+    const meetingOptions = zoomMeetings.map(meeting => {
+      const normalizedMeeting = normalizeMeetingForReport(meeting);
+      const value = encodeMeetingForForm(normalizedMeeting);
+      const label = getMeetingDropdownLabel(normalizedMeeting, timezone);
+
+      return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+    }).join('');
+
+    const generateSectionHtml = `
+      <div class="generate-box">
+        <h2>Generate Report</h2>
+
+        <form class="generate-form" method="GET" action="/admin/reports">
+          <label>Select Date</label>
+          <div class="inline-row">
+            <input type="date" name="generateDate" value="${escapeHtml(generateDate)}" required />
+            <button type="submit">Load Zoom Meetings</button>
+          </div>
+        </form>
+
+        ${
+          generateError
+            ? `<div class="error">Error: ${escapeHtml(generateError)}</div>`
+            : ''
+        }
+
+        ${
+          generateDate && zoomMeetings.length === 0 && !generateError
+            ? `<div class="note">No Zoom meetings found for this date.</div>`
+            : ''
+        }
+
+        ${
+          zoomMeetings.length > 0
+            ? `
+              <form class="generate-form" method="POST" action="/admin/reports/generate">
+                <label>Select Meeting</label>
+                <select name="meetingData" required>
+                  ${meetingOptions}
+                </select>
+
+                <button type="submit">Generate & Save Report</button>
+              </form>
+            `
+            : ''
+        }
+      </div>
+    `;
 
     const conditions = [];
     const params = [];
@@ -887,6 +1116,37 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
               font-size: 26px;
             }
 
+            h2 {
+              margin-top: 0;
+              font-size: 20px;
+            }
+
+            .generate-box {
+              background: #f9fafb;
+              border: 1px solid #e5e7eb;
+              border-radius: 12px;
+              padding: 16px;
+              margin-bottom: 22px;
+            }
+
+            .generate-form {
+              margin-top: 12px;
+            }
+
+            .inline-row {
+              display: flex;
+              gap: 10px;
+              flex-wrap: wrap;
+              align-items: center;
+              margin-top: 6px;
+            }
+
+            label {
+              display: block;
+              font-weight: bold;
+              margin-top: 10px;
+            }
+
             form.filter {
               display: flex;
               gap: 10px;
@@ -894,10 +1154,16 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
               margin-bottom: 18px;
             }
 
-            input {
+            input, select {
               padding: 9px;
               border: 1px solid #d1d5db;
               border-radius: 8px;
+              font-size: 14px;
+            }
+
+            select {
+              width: 100%;
+              margin-top: 6px;
             }
 
             button, .button {
@@ -938,6 +1204,16 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
             .logout button {
               background: #6b7280;
             }
+
+            .error {
+              color: #b91c1c;
+              margin-top: 12px;
+            }
+
+            .note {
+              color: #4b5563;
+              margin-top: 12px;
+            }
           </style>
         </head>
         <body>
@@ -949,6 +1225,10 @@ app.get('/admin/reports', requireLogin, async (req, res) => {
                 <button type="submit">Logout</button>
               </form>
             </div>
+
+            ${generateSectionHtml}
+
+            <h2>Saved Reports</h2>
 
             <form class="filter" method="GET" action="/admin/reports">
               <input type="text" name="date" placeholder="Date e.g. 04/08/2026" value="${escapeHtml(date)}" />
