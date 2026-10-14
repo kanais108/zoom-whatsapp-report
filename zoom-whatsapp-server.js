@@ -116,6 +116,21 @@ async function saveAttendanceReport({
   }
 
   const publicId = generatePublicReportId();
+  
+  const existingReport = await dbPool.query(
+  `
+    SELECT public_id
+    FROM attendance_reports
+    WHERE zoom_uuid = $1
+    LIMIT 1;
+  `,
+  [meetingUuid]
+);
+
+if (existingReport.rows.length > 0) {
+  console.log('Report already exists for this Zoom UUID. Skipping duplicate save.');
+  return existingReport.rows[0];
+}
 
   const result = await dbPool.query(
     `
